@@ -31,7 +31,10 @@ const (
 	EnvDevelopment = "DEV"
 )
 
-var spotifyClient *spotify.Client
+var (
+	spotifyClient *spotify.Client
+	spotifyConfig *clientcredentials.Config
+)
 
 func getEnvOrFatal(key string) string {
 	value := os.Getenv(key)
@@ -91,19 +94,16 @@ func main() {
 	}
 
 	// Set up a Spotify API client
-	config := &clientcredentials.Config{
+	spotifyConfig = &clientcredentials.Config{
 		ClientID:     spotifyClientID,
 		ClientSecret: spotifyClientSecret,
 		TokenURL:     auth.TokenURL,
 	}
 
-	token, err := config.Token(context.Background())
+	err = initSpotifyClient()
 	if err != nil {
-		log.WithError(err).Fatal("Error during Spotify token creation")
+		log.WithError(err).Fatal("Error during Spotify client creation")
 	}
-
-	httpClient := auth.New().Client(context.Background(), token)
-	spotifyClient = spotify.New(httpClient)
 
 	dispatcher := ext.NewDispatcher(&ext.DispatcherOpts{
 		// If a handler returns an error, log it and continue going.
@@ -164,6 +164,27 @@ func main() {
 	}
 
 	updater.Idle()
+}
+
+func initSpotifyClient() error {
+	token, err := spotifyConfig.Token(context.Background())
+	if err != nil {
+		return fmt.Errorf("error during Spotify token creation: %w", err)
+	}
+
+	spotifyAuth := auth.New(
+		auth.WithClientID(spotifyConfig.ClientID),
+		auth.WithClientSecret(spotifyConfig.ClientSecret),
+	)
+
+	newToken, err := spotifyAuth.RefreshToken(context.Background(), token)
+	if err != nil {
+		return fmt.Errorf("error refreshing Spotify token: %w", err)
+	}
+
+	httpClient := spotifyAuth.Client(context.Background(), newToken)
+	spotifyClient = spotify.New(httpClient)
+	return nil
 }
 
 type HandleAnything struct {
@@ -269,7 +290,14 @@ type trackData struct {
 }
 
 func searchSpotify(query string) (*spotify.SearchResult, error) {
-	return spotifyClient.Search(context.Background(), query, spotify.SearchTypeTrack)
+	results, err := spotifyClient.Search(context.Background(), query, spotify.SearchTypeTrack)
+	if err != nil && strings.Contains(err.Error(), "token expired") {
+		if refreshErr := initSpotifyClient(); refreshErr != nil {
+			return nil, refreshErr
+		}
+		return spotifyClient.Search(context.Background(), query, spotify.SearchTypeTrack)
+	}
+	return results, err
 }
 
 // buildSpotifyUserSearchURL constructs a Spotify search URL for the user with the given query.
